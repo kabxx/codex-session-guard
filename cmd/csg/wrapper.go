@@ -36,6 +36,11 @@ func runGuarded(target launchTarget, args []string, workingDir string, settings 
 		WrapperStartTime: wrapperStart,
 		Launcher:         target.persistedLauncher(),
 	}
+	if sessionID := explicitResumeSessionID(args); sessionID != "" {
+		record.SessionID = sessionID
+		record.SessionPrebound = true
+		record.SessionSource = "resume-argument"
+	}
 	if err := saveNewRun(record); err != nil {
 		fmt.Fprintln(os.Stderr, "Codex Session Guard: failed to create a session record:", err)
 		return 1

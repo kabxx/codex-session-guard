@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -47,6 +48,92 @@ Arguments after the target are used only for this launch. Resume always invokes 
 		return 1
 	}
 	return runGuarded(target, args[1:], "", settings)
+}
+
+// explicitResumeSessionID recognizes only an unambiguous Codex CLI invocation:
+// known global options, followed by "resume" and a final UUID argument. A
+// prompt or resume picker option will trigger the Hook on its own and is left
+// for the launcher to resolve.
+func explicitResumeSessionID(args []string) string {
+	for index := 0; index < len(args); {
+		if args[index] == "resume" {
+			if index+2 != len(args) {
+				return ""
+			}
+			sessionID, ok := canonicalSessionUUID(args[index+1])
+			if !ok {
+				return ""
+			}
+			return sessionID
+		}
+		consumed, ok := consumeKnownGlobalOption(args, index)
+		if !ok {
+			return ""
+		}
+		index += consumed
+	}
+	return ""
+}
+
+func consumeKnownGlobalOption(args []string, index int) (int, bool) {
+	argument := args[index]
+	for _, flag := range []string{
+		"--strict-config",
+		"--oss",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--dangerously-bypass-hook-trust",
+		"--search",
+		"--no-alt-screen",
+	} {
+		if argument == flag {
+			return 1, true
+		}
+	}
+	valueOptions := []string{
+		"-c", "--config",
+		"--enable", "--disable",
+		"--remote", "--remote-auth-token-env",
+		"-i", "--image",
+		"-m", "--model",
+		"--local-provider",
+		"-p", "--profile",
+		"-s", "--sandbox",
+		"-C", "--cd",
+		"--add-dir",
+		"-a", "--ask-for-approval",
+	}
+	for _, option := range valueOptions {
+		if argument == option {
+			if index+1 >= len(args) {
+				return 0, false
+			}
+			return 2, true
+		}
+		if strings.HasPrefix(option, "--") && strings.HasPrefix(argument, option+"=") && len(argument) > len(option)+1 {
+			return 1, true
+		}
+	}
+	return 0, false
+}
+
+func canonicalSessionUUID(value string) (string, bool) {
+	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
+		return "", false
+	}
+	compact := strings.ReplaceAll(value, "-", "")
+	decoded, err := hex.DecodeString(compact)
+	if err != nil || len(decoded) != 16 {
+		return "", false
+	}
+	allZero := true
+	for _, item := range decoded {
+		allZero = allZero && item == 0
+	}
+	version := decoded[6] >> 4
+	if allZero || version == 0 || version > 8 || decoded[8]&0xc0 != 0x80 {
+		return "", false
+	}
+	return strings.ToLower(value), true
 }
 
 func resolveLaunchTarget(requested, cwd, installDir string) (launchTarget, error) {

@@ -11,7 +11,7 @@ CSG is opt-in. Running `codex` or `spine-codex` directly does not install a wrap
 - Explicit monitoring through `csg run` only
 - Live status listing plus Session ID based recovery and deletion
 - Windows Job Objects for CMD/BAT and descendant process supervision
-- Linux and macOS process-group supervision with a keeper process
+- Linux and macOS process-group supervision with one foreground supervisor per session
 - Crash-safe run records with PID and process-start identity checks
 - Launcher-agnostic recovery: the original launcher is used again
 - Transactional install, upgrade, rollback, and ownership-checked uninstall
@@ -62,8 +62,7 @@ The list reports four states:
 
 | Status | Meaning |
 | --- | --- |
-| `STARTING` | The launcher is running, but the SessionStart Hook has not supplied a Session ID yet. |
-| `RUNNING` | The monitored session is active. |
+| `RUNNING` | The monitored session is active. A `pending (waiting for first turn)` Session value means the launcher has not supplied a Session ID yet. A `prebound; waiting for Hook confirmation` value means CSG already knows an explicit resume UUID and is waiting for the Hook to confirm it. |
 | `UNKNOWN` | Process liveness could not be verified safely; the session is not treated as recoverable. |
 | `CRASHED` | The monitored process tree stopped unexpectedly and the session can be resumed. |
 
@@ -98,17 +97,19 @@ The first launcher's extra arguments are used only for that launch. They are not
 3. The supervisor waits for the complete process tree, including a script that exits before its child Codex process.
 4. A normal exit or user interrupt removes the record. An abrupt stop leaves it on disk for the next `csg list`.
 5. `csg list` checks PID plus process-start identity and reports active and crashed sessions without mistaking a reused PID for the old process.
-6. `csg resume` atomically claims the record, starts the original launcher, and lets the new Hook clear the old record.
+6. `csg resume` atomically claims the record, pre-binds the known UUID before starting the original launcher, and lets the new Hook confirm it and enrich the record.
 
-Session records are written atomically before the target starts. This lets a reboot or power interruption leave a recoverable record without requiring a background service. If the target stops before a Session ID is received, the temporary record is discarded because there is no safe recovery key.
+Session records are written atomically before the target starts. This lets a reboot or power interruption leave a recoverable record without requiring a background service. Explicit `resume <SESSION_ID>` arguments are pre-bound before launch, so a resumed session does not need a first user turn before it can be recovered again. New sessions and name-based resume still wait for the SessionStart Hook to provide the resolved UUID.
 
 ## Scope and Limits
 
-The target launcher must preserve the CSG run ID environment variable, pass through the Hook-related arguments, and support `resume <SESSION_ID>`. CSG does not parse the internals of CMD, BAT, or shell scripts.
+The target launcher must preserve the CSG run ID environment variable, pass through the Hook-related arguments, and support `resume <SESSION_ID>`. CSG recognizes only a valid UUID after the structured `resume` command for pre-binding; it never treats a session name as an ID. CSG does not parse the internals of CMD, BAT, or shell scripts.
 
 Windows CMD/BAT launchers cannot receive arguments containing newlines through the Windows command-line syntax. Use a native executable when multiline arguments are required.
 
 Processes deliberately moved to an external service, scheduled task, or escaped process group are outside the supervision boundary. Records are platform-specific and are not automatically executable after being copied to another operating system.
+
+On Unix, if the CSG supervisor alone is forcibly killed while the target process group remains healthy, the group may continue running because no separate daemon is retained to kill it. Terminal close and computer failure remain covered by the process group and durable run record; Windows Job Object supervision still terminates the tree when the supervisor disappears.
 
 ## State and Hooks
 

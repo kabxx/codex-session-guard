@@ -41,6 +41,7 @@ type RunRecord struct {
 	CodexPID          int             `json:"codex_pid"`
 	CodexStartTime    uint64          `json:"codex_start_time"`
 	SessionID         string          `json:"session_id,omitempty"`
+	SessionPrebound   bool            `json:"session_prebound,omitempty"`
 	TranscriptPath    string          `json:"transcript_path,omitempty"`
 	SessionSource     string          `json:"session_source,omitempty"`
 	ExitCode          int             `json:"exit_code,omitempty"`

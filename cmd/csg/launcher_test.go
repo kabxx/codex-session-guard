@@ -43,6 +43,34 @@ func TestResolveLaunchTargetAllowsUpstreamCodexInInstallDirectory(t *testing.T) 
 	}
 }
 
+func TestExplicitResumeSessionID(t *testing.T) {
+	const sessionID = "019fc699-08ca-7f03-b620-98bd93511d80"
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "direct", args: []string{"resume", sessionID}, want: sessionID},
+		{name: "global options", args: []string{"--profile", "work", "--strict-config", "--enable=hooks", "resume", sessionID}, want: sessionID},
+		{name: "uppercase", args: []string{"resume", strings.ToUpper(sessionID)}, want: sessionID},
+		{name: "session name", args: []string{"resume", "my-project"}},
+		{name: "picker", args: []string{"resume"}},
+		{name: "last picker", args: []string{"resume", "--last"}},
+		{name: "prompt triggers hook", args: []string{"resume", sessionID, "continue"}},
+		{name: "unknown global option", args: []string{"--future-option", "value", "resume", sessionID}},
+		{name: "resume inside prompt", args: []string{"please", "resume", sessionID}},
+		{name: "invalid uuid variant", args: []string{"resume", "019fc699-08ca-7f03-7620-98bd93511d80"}},
+		{name: "nil uuid", args: []string{"resume", "00000000-0000-0000-0000-000000000000"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := explicitResumeSessionID(test.args); got != test.want {
+				t.Fatalf("explicitResumeSessionID(%q) = %q, want %q", test.args, got, test.want)
+			}
+		})
+	}
+}
+
 func TestResolveLaunchTargetAllowsOtherCommandInGuardInstallDirectory(t *testing.T) {
 	installDir := t.TempDir()
 	requested := "imba-codex"

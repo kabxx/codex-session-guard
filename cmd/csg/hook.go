@@ -52,6 +52,7 @@ func bindSession(runID string, input HookInput) error {
 			record.CodexStartTime = ancestorStart
 		}
 		record.SessionID = input.SessionID
+		record.SessionPrebound = false
 		record.TranscriptPath = input.TranscriptPath
 		record.SessionSource = input.Source
 		if input.CWD != "" {

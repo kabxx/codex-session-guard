@@ -8,18 +8,14 @@ import (
 )
 
 const (
-	programVersion    = "0.7.0"
+	programVersion    = "0.8.0"
 	hookCommand       = "codex-session-guard hook"
 	legacyHookCommand = "codex-session-guard.exe hook"
 	hookMatcher       = "startup|resume|clear|compact"
 	runIDEnv          = "CODEX_SESSION_GUARD_RUN_ID"
-	internalModeEnv   = "CODEX_SESSION_GUARD_INTERNAL_MODE"
 )
 
 func main() {
-	if mode := os.Getenv(internalModeEnv); mode != "" {
-		os.Exit(internalMain(mode))
-	}
 	base := executableName(os.Args[0])
 	args := os.Args[1:]
 

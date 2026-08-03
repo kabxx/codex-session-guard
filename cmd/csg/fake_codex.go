@@ -47,6 +47,14 @@ func runFakeCodex(args []string) int {
 			argsFile = strings.TrimPrefix(arg, "--fake-args-file=")
 		}
 	}
+	if os.Getenv("CSG_FAKE_NO_HOOK") == "1" {
+		skipHook = true
+	}
+	if value := os.Getenv("CSG_FAKE_SLEEP_MS"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			sleepMilliseconds = parsed
+		}
+	}
 	if argsFile != "" {
 		data, err := json.Marshal(args)
 		if err != nil || os.WriteFile(argsFile, data, 0o600) != nil {

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -194,6 +195,8 @@ func TestWindowsJobKillsTreeWhenGuardIsKilled(t *testing.T) {
 	guardState := filepath.Join(root, "state")
 	t.Setenv("CODEX_SESSION_GUARD_HOME", guardState)
 	t.Setenv("CSG_FAKE_CODEX", filepath.Join(binDir, "fake-codex.exe"))
+	t.Setenv("CSG_FAKE_NO_HOOK", "1")
+	t.Setenv("CSG_FAKE_SLEEP_MS", "30000")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	settings := Settings{Version: 1, InstallDir: binDir, RealCodexPath: filepath.Join(binDir, "fake-codex.exe")}
 	if err := writeJSONAtomic(mustSettingsPath(t), settings); err != nil {
@@ -201,7 +204,8 @@ func TestWindowsJobKillsTreeWhenGuardIsKilled(t *testing.T) {
 	}
 
 	launcher := testdataFile(t, "fake-launcher.cmd")
-	command := exec.Command(filepath.Join(binDir, "csg.exe"), "run", launcher, "--fake-sleep-ms=30000")
+	sessionID := "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	command := exec.Command(filepath.Join(binDir, "csg.exe"), "run", launcher, "resume", sessionID)
 	var output bytes.Buffer
 	command.Stdout = &output
 	command.Stderr = &output
@@ -213,7 +217,7 @@ func TestWindowsJobKillsTreeWhenGuardIsKilled(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		runs, _ := readAllRuns()
-		if len(runs) == 1 && runs[0].SessionID != "" {
+		if len(runs) == 1 && runs[0].SessionID == sessionID {
 			record = runs[0]
 			break
 		}
@@ -223,6 +227,12 @@ func TestWindowsJobKillsTreeWhenGuardIsKilled(t *testing.T) {
 		_ = command.Process.Kill()
 		_ = command.Wait()
 		t.Fatalf("session did not bind:\n%s", output.String())
+	}
+	if !record.SessionPrebound {
+		t.Fatalf("explicit resume was not prebound: %+v", record)
+	}
+	if got := descendantExecutableCount(record.WrapperPID, "csg.exe"); got != 1 {
+		t.Fatalf("guard tree contains %d csg.exe processes, want one supervisor", got)
 	}
 	tracked := descendantIdentities(record.WrapperPID)
 	for _, pid := range []int{record.WrapperPID, record.CodexPID} {
@@ -257,6 +267,28 @@ func TestWindowsJobKillsTreeWhenGuardIsKilled(t *testing.T) {
 	if err != nil || len(recoverable) != 1 {
 		t.Fatalf("recoverable=%+v err=%v\n%s", recoverable, err, output.String())
 	}
+}
+
+func descendantExecutableCount(rootPID int, executable string) int {
+	entries := processSnapshot()
+	selected := map[uint32]bool{uint32(rootPID): true}
+	for changed := true; changed; {
+		changed = false
+		for pid, entry := range entries {
+			if !selected[pid] && selected[entry.ParentProcessID] {
+				selected[pid] = true
+				changed = true
+			}
+		}
+	}
+	count := 0
+	for pid := range selected {
+		entry, ok := entries[pid]
+		if ok && strings.EqualFold(syscall.UTF16ToString(entry.ExeFile[:]), executable) {
+			count++
+		}
+	}
+	return count
 }
 
 func TestGenericRecoveryUsesOriginalLauncher(t *testing.T) {

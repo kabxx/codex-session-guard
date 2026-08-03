@@ -3,23 +3,14 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
-	"strconv"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
-)
-
-const (
-	unixKeeperMode      = "unix-group-keeper"
-	unixOwnerPIDEnv     = "CODEX_SESSION_GUARD_UNIX_OWNER_PID"
-	unixOwnerStartEnv   = "CODEX_SESSION_GUARD_UNIX_OWNER_START"
-	unixProcessGroupEnv = "CODEX_SESSION_GUARD_UNIX_PROCESS_GROUP"
 )
 
 func superviseProcess(spec processSpec, onStart func(int, uint64)) processResult {
@@ -34,11 +25,6 @@ func superviseProcess(spec processSpec, onStart func(int, uint64)) processResult
 		return processResult{Err: err, ExitCode: 1}
 	}
 	pid := cmd.Process.Pid
-	if err := startUnixGroupKeeper(pid); err != nil {
-		_ = unix.Kill(-pid, unix.SIGKILL)
-		_ = cmd.Wait()
-		return processResult{Err: fmt.Errorf("failed to establish Unix process-group supervision: %w", err), ExitCode: 1}
-	}
 	restoreTerminal := giveTerminalTo(pid)
 	defer restoreTerminal()
 	started, _ := processIdentity(pid)
@@ -78,32 +64,6 @@ func superviseProcess(spec processSpec, onStart func(int, uint64)) processResult
 		Detached:     detached,
 		SessionEnded: sessionEnded,
 	}
-}
-
-func startUnixGroupKeeper(pgid int) error {
-	self, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	ownerStart, alive := processIdentity(os.Getpid())
-	if !alive {
-		return fmt.Errorf("cannot verify the guard process state")
-	}
-	keeper := exec.Command(self)
-	keeper.Env = os.Environ()
-	keeper.Env = setEnv(keeper.Env, internalModeEnv, unixKeeperMode)
-	keeper.Env = setEnv(keeper.Env, unixOwnerPIDEnv, strconv.Itoa(os.Getpid()))
-	keeper.Env = setEnv(keeper.Env, unixOwnerStartEnv, strconv.FormatUint(ownerStart, 10))
-	keeper.Env = setEnv(keeper.Env, unixProcessGroupEnv, strconv.Itoa(pgid))
-	keeper.Stdin = nil
-	keeper.Stdout = nil
-	keeper.Stderr = nil
-	keeper.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := keeper.Start(); err != nil {
-		return err
-	}
-	go func() { _ = keeper.Wait() }()
-	return nil
 }
 
 func waitForUnixProcessGroup(pgid int, runID string, forceStop bool) (bool, bool) {

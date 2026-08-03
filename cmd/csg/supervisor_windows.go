@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -18,12 +17,6 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
-)
-
-const (
-	jobKeeperMode  = "windows-job-keeper"
-	jobHandleEnv   = "CODEX_SESSION_GUARD_JOB_HANDLE"
-	jobOwnerPIDEnv = "CODEX_SESSION_GUARD_JOB_OWNER_PID"
 )
 
 type jobBasicAccountingInformation struct {
@@ -38,7 +31,7 @@ type jobBasicAccountingInformation struct {
 }
 
 func superviseProcess(spec processSpec, onStart func(int, uint64)) processResult {
-	job, err := startWindowsJobKeeper()
+	job, err := createWindowsJob()
 	if err != nil {
 		return processResult{Err: fmt.Errorf("failed to establish Windows process-tree supervision: %w", err), ExitCode: 1}
 	}
@@ -53,11 +46,25 @@ func superviseProcess(spec processSpec, onStart func(int, uint64)) processResult
 	cmd.Stderr = os.Stderr
 	cmd.Dir = spec.cwd
 	cmd.Env = spec.env
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
 	if err := cmd.Start(); err != nil {
 		return processResult{Err: err, ExitCode: 1}
 	}
+	if err := assignProcessToJob(job, cmd.Process.Pid); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return processResult{Err: fmt.Errorf("failed to assign the launcher to the Windows Job: %w", err), ExitCode: 1}
+	}
 	started, _ := processIdentity(cmd.Process.Pid)
 	onStart(cmd.Process.Pid, started)
+	if err := resumeSuspendedProcess(cmd.Process.Pid); err != nil {
+		_ = windows.TerminateJobObject(job, 1)
+		_ = cmd.Wait()
+		return processResult{Err: fmt.Errorf("failed to resume the supervised launcher: %w", err), ExitCode: 1}
+	}
 
 	var interrupted atomic.Bool
 	interrupts := make(chan os.Signal, 4)
@@ -90,7 +97,7 @@ func superviseProcess(spec processSpec, onStart func(int, uint64)) processResult
 	}
 }
 
-func startWindowsJobKeeper() (windows.Handle, error) {
+func createWindowsJob() (windows.Handle, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return 0, err
@@ -110,65 +117,56 @@ func startWindowsJobKeeper() (windows.Handle, error) {
 		cleanup()
 		return 0, err
 	}
-	if err := windows.SetHandleInformation(job, windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT); err != nil {
-		cleanup()
-		return 0, err
-	}
-
-	self, err := os.Executable()
-	if err != nil {
-		cleanup()
-		return 0, err
-	}
-	keeper := exec.Command(self)
-	keeper.Env = os.Environ()
-	keeper.Env = setEnv(keeper.Env, internalModeEnv, jobKeeperMode)
-	keeper.Env = setEnv(keeper.Env, jobHandleEnv, strconv.FormatUint(uint64(job), 10))
-	keeper.Env = setEnv(keeper.Env, jobOwnerPIDEnv, strconv.Itoa(os.Getpid()))
-	keeper.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags:              windows.CREATE_NO_WINDOW,
-		AdditionalInheritedHandles: []syscall.Handle{syscall.Handle(job)},
-	}
-	if err := keeper.Start(); err != nil {
-		cleanup()
-		return 0, err
-	}
-	_ = windows.SetHandleInformation(job, windows.HANDLE_FLAG_INHERIT, 0)
-	go func() { _ = keeper.Wait() }()
-
-	if err := windows.AssignProcessToJobObject(job, windows.CurrentProcess()); err != nil {
-		_ = keeper.Process.Kill()
-		cleanup()
-		return 0, err
-	}
 	return job, nil
 }
 
-func internalMain(mode string) int {
-	if mode != jobKeeperMode {
-		return 2
+func assignProcessToJob(job windows.Handle, pid int) error {
+	process, err := windows.OpenProcess(
+		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE,
+		false,
+		uint32(pid),
+	)
+	if err != nil {
+		return err
 	}
-	handleValue, err := strconv.ParseUint(os.Getenv(jobHandleEnv), 10, 64)
-	if err != nil || handleValue == 0 {
-		return 2
+	defer windows.CloseHandle(process)
+	return windows.AssignProcessToJobObject(job, process)
+}
+
+func resumeSuspendedProcess(pid int) error {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return err
 	}
-	job := windows.Handle(handleValue)
-	defer windows.CloseHandle(job)
-	ownerPID, err := strconv.Atoi(os.Getenv(jobOwnerPIDEnv))
-	if err != nil || ownerPID <= 0 {
-		return 2
+	defer windows.CloseHandle(snapshot)
+
+	entry := windows.ThreadEntry32{Size: uint32(unsafe.Sizeof(windows.ThreadEntry32{}))}
+	if err := windows.Thread32First(snapshot, &entry); err != nil {
+		return err
 	}
-	owner, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(ownerPID))
-	if err == nil {
-		_, _ = windows.WaitForSingleObject(owner, windows.INFINITE)
-		_ = windows.CloseHandle(owner)
+	for {
+		if entry.OwnerProcessID == uint32(pid) {
+			thread, openErr := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID)
+			if openErr != nil {
+				return openErr
+			}
+			_, resumeErr := windows.ResumeThread(thread)
+			_ = windows.CloseHandle(thread)
+			return resumeErr
+		}
+		entry.Size = uint32(unsafe.Sizeof(windows.ThreadEntry32{}))
+		if err := windows.Thread32Next(snapshot, &entry); err != nil {
+			if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+				return errors.New("the suspended launcher thread was not found")
+			}
+			return err
+		}
 	}
-	return 0
 }
 
 func waitForWindowsJob(job windows.Handle, runID string, forceStop bool) (bool, bool) {
 	active, err := activeJobProcesses(job)
-	if err != nil || active <= 1 {
+	if err != nil || active == 0 {
 		return false, sessionEndWasSeen(runID)
 	}
 	detached := true
@@ -182,7 +180,7 @@ func waitForWindowsJob(job windows.Handle, runID string, forceStop bool) (bool, 
 			deadline = time.Now().Add(2 * time.Second)
 		}
 		active, err = activeJobProcesses(job)
-		if err != nil || active <= 1 {
+		if err != nil || active == 0 {
 			return detached, sessionEnded
 		}
 		if !deadline.IsZero() && time.Now().After(deadline) {

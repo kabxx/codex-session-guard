@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestGenericUnixLauncherLifecycle(t *testing.T) {
@@ -122,15 +124,18 @@ exit 0
 	})
 }
 
-func TestUnixKeeperKillsGroupWhenGuardIsKilled(t *testing.T) {
+func TestUnixGuardKillLeavesDurableRecord(t *testing.T) {
 	root, binDir, fake, csg := buildUnixTestCommands(t)
-	launcher := writeUnixLauncher(t, root, "keeper.sh", `#!/bin/sh
+	launcher := writeUnixLauncher(t, root, "guard-kill.sh", `#!/bin/sh
 exec "$CSG_FAKE_CODEX" "$@"
 `)
-	guardState := filepath.Join(root, "keeper-state")
+	guardState := filepath.Join(root, "guard-kill-state")
 	configureUnixTest(t, guardState, binDir, fake)
+	t.Setenv("CSG_FAKE_NO_HOOK", "1")
+	t.Setenv("CSG_FAKE_SLEEP_MS", "30000")
 
-	command := exec.Command(csg, "run", launcher, "--fake-sleep-ms=30000")
+	sessionID := "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	command := exec.Command(csg, "run", launcher, "resume", sessionID)
 	var output bytes.Buffer
 	command.Stdout = &output
 	command.Stderr = &output
@@ -141,7 +146,7 @@ exec "$CSG_FAKE_CODEX" "$@"
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		runs, _ := readAllRuns()
-		if len(runs) == 1 && runs[0].SessionID != "" {
+		if len(runs) == 1 && runs[0].SessionID == sessionID {
 			record = runs[0]
 			break
 		}
@@ -152,16 +157,26 @@ exec "$CSG_FAKE_CODEX" "$@"
 		_ = command.Wait()
 		t.Fatalf("session did not bind:\n%s", output.String())
 	}
+	if !record.SessionPrebound {
+		t.Fatalf("explicit resume was not prebound: %+v", record)
+	}
 	if err := command.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
 	_ = command.Wait()
+	if _, err := loadRun(record.RunID); err != nil {
+		t.Fatalf("guard kill removed the durable run record: %v", err)
+	}
+
+	// With no daemon or keeper, killing only the supervisor does not promise to
+	// stop an otherwise healthy target group. Clean up the test group explicitly.
+	_ = unix.Kill(-record.CodexPID, unix.SIGKILL)
 	deadline = time.Now().Add(5 * time.Second)
 	for sameProcessAlive(record.CodexPID, record.CodexStartTime) && time.Now().Before(deadline) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	if sameProcessAlive(record.CodexPID, record.CodexStartTime) {
-		t.Fatalf("child survived guard kill: pid=%d", record.CodexPID)
+		t.Fatalf("failed to clean up target process group: pid=%d", record.CodexPID)
 	}
 	recoverable, err := recoveryCandidates()
 	if err != nil || len(recoverable) != 1 {

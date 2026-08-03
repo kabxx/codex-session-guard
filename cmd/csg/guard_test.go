@@ -41,6 +41,34 @@ func TestRunRecordRoundTripAndBinding(t *testing.T) {
 	}
 }
 
+func TestHookConfirmsAndCorrectsPreboundSession(t *testing.T) {
+	useTempGuardHome(t)
+	runID := "01112233445566778899aabbccddeeff"
+	prebound := "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	confirmed := "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+	record := RunRecord{
+		Version:         2,
+		RunID:           runID,
+		StartedAt:       time.Now().UTC(),
+		SessionID:       prebound,
+		SessionPrebound: true,
+		SessionSource:   "resume-argument",
+	}
+	if err := saveNewRun(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := bindSession(runID, HookInput{SessionID: confirmed, TranscriptPath: "rollout.jsonl", Source: "resume"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SessionID != confirmed || got.SessionPrebound || got.SessionSource != "resume" || got.TranscriptPath != "rollout.jsonl" {
+		t.Fatalf("Hook did not confirm and correct the prebound session: %+v", got)
+	}
+}
+
 func TestBindingFollowsClearSession(t *testing.T) {
 	useTempGuardHome(t)
 	runID := "10112233445566778899aabbccddeeff"
@@ -88,7 +116,7 @@ func TestRecoverableRunsHidesLiveAndDeduplicates(t *testing.T) {
 	}
 }
 
-func TestTrackedSessionsIncludesStartingRunningAndCrashed(t *testing.T) {
+func TestTrackedSessionsIncludesPendingRunningAndCrashed(t *testing.T) {
 	useTempGuardHome(t)
 	now := time.Now().UTC()
 	currentStart, alive := processIdentity(os.Getpid())
@@ -113,7 +141,7 @@ func TestTrackedSessionsIncludesStartingRunningAndCrashed(t *testing.T) {
 	if len(sessions) != 3 {
 		t.Fatalf("tracked sessions = %+v", sessions)
 	}
-	want := []trackedStatus{statusStarting, statusRunning, statusCrashed}
+	want := []trackedStatus{statusRunning, statusRunning, statusCrashed}
 	for index, status := range want {
 		if sessions[index].Status != status {
 			t.Fatalf("session %d status = %s, want %s", index, sessions[index].Status, status)
@@ -123,6 +151,19 @@ func TestTrackedSessionsIncludesStartingRunningAndCrashed(t *testing.T) {
 	recoverable, err := recoveryCandidates()
 	if err != nil || len(recoverable) != 1 || recoverable[0].SessionID != "crashed" {
 		t.Fatalf("recoverable = %+v, err = %v", recoverable, err)
+	}
+}
+
+func TestSessionBindingLabelsPendingAndPreboundRecords(t *testing.T) {
+	const sessionID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	if got := sessionBindingLabel(RunRecord{}); got != "pending (waiting for first turn)" {
+		t.Fatalf("pending label = %q", got)
+	}
+	if got := sessionBindingLabel(RunRecord{SessionID: sessionID, SessionPrebound: true}); !strings.Contains(got, sessionID) || !strings.Contains(got, "Hook confirmation") {
+		t.Fatalf("prebound label = %q", got)
+	}
+	if got := sessionBindingLabel(RunRecord{SessionID: sessionID}); got != sessionID {
+		t.Fatalf("confirmed label = %q", got)
 	}
 }
 
@@ -403,6 +444,9 @@ func TestCSGRequiresExplicitSubcommand(t *testing.T) {
 	}
 	if code := csgMain([]string{"resume"}); code != 2 {
 		t.Fatalf("csg resume without a session ID returned %d, want 2", code)
+	}
+	if code := csgMain([]string{"resume", "session-name"}); code != 2 {
+		t.Fatalf("csg resume accepted a non-UUID name: %d", code)
 	}
 	if code := csgMain([]string{"delete"}); code != 2 {
 		t.Fatalf("csg delete without a session ID returned %d, want 2", code)

@@ -28,7 +28,12 @@ func resumeMain(args []string) int {
 		fmt.Fprintln(os.Stderr, "Usage: csg resume <session-id>")
 		return 2
 	}
-	return recoverMain(args[0])
+	sessionID, ok := canonicalSessionUUID(args[0])
+	if !ok {
+		fmt.Fprintln(os.Stderr, "csg resume: session ID must be a valid UUID")
+		return 2
+	}
+	return recoverMain(sessionID)
 }
 
 func deleteMain(args []string) int {
@@ -161,10 +166,9 @@ func recoverMain(sessionID string) int {
 type trackedStatus string
 
 const (
-	statusStarting trackedStatus = "STARTING"
-	statusRunning  trackedStatus = "RUNNING"
-	statusUnknown  trackedStatus = "UNKNOWN"
-	statusCrashed  trackedStatus = "CRASHED"
+	statusRunning trackedStatus = "RUNNING"
+	statusUnknown trackedStatus = "UNKNOWN"
+	statusCrashed trackedStatus = "CRASHED"
 )
 
 type trackedSession struct {
@@ -192,17 +196,24 @@ func printTrackedSessions(sessions []trackedSession) {
 	for _, session := range sessions {
 		record := session.Record
 		when := record.StartedAt.Local().Format("2006-01-02 15:04:05")
-		sessionID := record.SessionID
-		if sessionID == "" {
-			sessionID = "(pending)"
-		}
-		fmt.Printf("%-8s %s\n", session.Status, sessionID)
+		fmt.Printf("%s\n", session.Status)
+		fmt.Printf("  Session:   %s\n", sessionBindingLabel(record))
 		fmt.Printf("  Started:   %s\n  Launcher:  %s\n  Directory: %s\n", when, launcherLabel(record), record.CWD)
 		if session.Status == statusCrashed && record.ExitCode != 0 {
 			fmt.Printf("  Exit code: %d\n", record.ExitCode)
 		}
 		fmt.Println()
 	}
+}
+
+func sessionBindingLabel(record RunRecord) string {
+	if record.SessionID == "" {
+		return "pending (waiting for first turn)"
+	}
+	if record.SessionPrebound {
+		return record.SessionID + " (prebound; waiting for Hook confirmation)"
+	}
+	return record.SessionID
 }
 
 func findRecordBySessionID(records []RunRecord, sessionID string) (RunRecord, bool) {
@@ -262,9 +273,6 @@ func trackedSessions() ([]trackedSession, error) {
 func statusForRecord(record RunRecord) trackedStatus {
 	switch recordProcessLiveness(record) {
 	case processAlive:
-		if record.SessionID == "" {
-			return statusStarting
-		}
 		return statusRunning
 	case processUnknown:
 		return statusUnknown
