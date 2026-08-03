@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test with race detector
+        run: go test -race ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...
+      - name: Check Unix install scripts
+        if: runner.os != 'Windows'
+        shell: sh
+        run: sh -n scripts/build.sh scripts/install.sh scripts/uninstall.sh scripts/test-integration.sh
+      - name: Unix integration test
+        if: runner.os != 'Windows'
+        shell: sh
+        run: |
+          sh ./scripts/build.sh
+          sh ./scripts/test-integration.sh
+      - name: Windows integration test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./scripts/build.ps1
+          ./scripts/test-integration.ps1
